@@ -1,8 +1,22 @@
 from datetime import timedelta
-from django.db.models import Q, Sum
 
 from planning.models import ShiftAssignment
 from personnel.models import Staff, Contract, StaffCertification
+
+ON_CALL_KEYWORDS = ("astreinte", "on-call", "on call")
+ON_CALL_QUOTA_FACTOR = 0.25
+
+
+def is_on_call_shift(shift):
+    shift_type_name = (shift.shift_type.name or "").strip().lower()
+    return any(keyword in shift_type_name for keyword in ON_CALL_KEYWORDS)
+
+
+def get_quota_weighted_hours(shift):
+    if is_on_call_shift(shift):
+        return shift.shift_type.duration_hours * ON_CALL_QUOTA_FACTOR
+    return shift.shift_type.duration_hours
+
 
 def check_overlap(staff, shift):
     errors = []
@@ -71,14 +85,23 @@ def check_rest_after_night(staff, shift):
 def check_weekly_hours(staff, shift):
     errors = []
 
-    week_hours = ShiftAssignment.objects.filter(
-        staff=staff,
-        shift__start_datetime__week=shift.start_datetime.isocalendar().week
-    ).aggregate(
-        total=Sum("shift__shift_type__duration_hours")
-    )["total"] or 0
+    # Use an explicit ISO week window instead of __week to avoid
+    # database/timezone-dependent week extraction behaviors.
+    shift_date = shift.start_datetime.date()
+    week_start = shift_date - timedelta(days=shift_date.isoweekday() - 1)
+    week_end = week_start + timedelta(days=6)
 
-    new_total = week_hours + shift.shift_type.duration_hours
+    week_assignments = ShiftAssignment.objects.filter(
+        staff=staff,
+        shift__start_datetime__date__gte=week_start,
+        shift__start_datetime__date__lte=week_end,
+    ).select_related("shift__shift_type")
+
+    week_hours = sum(
+        get_quota_weighted_hours(assignment.shift) for assignment in week_assignments
+    )
+
+    new_total = week_hours + get_quota_weighted_hours(shift)
 
     if new_total > 48:
         errors.append("Quota hebdomadaire dépassé.")

@@ -1,10 +1,47 @@
 # planning/generator.py
 
 from datetime import timedelta
-from django.db.models import Count, Sum, Q
-from .models import Shift, ShiftAssignment
+from .models import Shift, ShiftAssignment, PatientLoad
 from .constraints import validate_shift_assignment
 from personnel.models import Staff
+
+SURGE_KEYWORDS = ("sur-activite", "sur activité", "sur-activité", "suractivite")
+SURGE_OCCUPANCY_THRESHOLD = 0.85
+
+
+def is_public_holiday(shift_date):
+    """MVP: fixed-date public holidays used for fairness scoring."""
+    fixed_holidays = {
+        (1, 1),    # Jour de l'an
+        (5, 1),    # Fete du Travail
+        (5, 8),    # Victoire 1945
+        (7, 14),   # Fete nationale
+        (8, 15),   # Assomption
+        (11, 1),   # Toussaint
+        (11, 11),  # Armistice
+        (12, 25),  # Noel
+    }
+    return (shift_date.month, shift_date.day) in fixed_holidays
+
+
+def is_weekend_or_holiday(shift_datetime):
+    shift_date = shift_datetime.date()
+    return shift_datetime.weekday() >= 5 or is_public_holiday(shift_date)
+
+
+def is_surge_shift(shift):
+    shift_type_name = (shift.shift_type.name or "").strip().lower()
+    return any(keyword in shift_type_name for keyword in SURGE_KEYWORDS)
+
+
+def is_surge_shift_active(shift):
+    if not is_surge_shift(shift):
+        return True
+    load = PatientLoad.objects.filter(
+        care_unit=shift.care_unit,
+        date=shift.start_datetime.date(),
+    ).first()
+    return bool(load and load.occupancy_rate >= SURGE_OCCUPANCY_THRESHOLD)
 
 
 # ─────────────────────────────────────────────
@@ -48,15 +85,19 @@ def compute_soft_score(staff, shift, period_start, period_end):
     ).values('shift__care_unit').distinct().count()
     penalty += other_units * 15  # poids 15 par unité différente cette semaine
 
-    # S-04 — Week-end : équité sur la période
-    if shift.start_datetime.weekday() >= 5:  # samedi ou dimanche
-        nb_weekends = ShiftAssignment.objects.filter(
+    # S-04 — Week-end/Jour férié : équité sur la période
+    if is_weekend_or_holiday(shift.start_datetime):
+        period_assignments = ShiftAssignment.objects.filter(
             staff=staff,
-            shift__start_datetime__week=shift.start_datetime.isocalendar().week,
-            shift__start_datetime__iso_year=shift.start_datetime.isocalendar().year,
-            shift__start_datetime__week_day__in=[1, 7],  # dim=1, sam=7 en Django
-        ).count()
-        penalty += nb_weekends * 25  # poids 25 par garde de week-end déjà attribuée
+            shift__start_datetime__gte=period_start,
+            shift__start_datetime__lte=period_end,
+        ).select_related("shift")
+        weekend_or_holiday_count = sum(
+            1
+            for assignment in period_assignments
+            if is_weekend_or_holiday(assignment.shift.start_datetime)
+        )
+        penalty += weekend_or_holiday_count * 25  # poids 25 par garde déjà attribuée
 
     return penalty
 
@@ -90,6 +131,9 @@ def generate_planning(period_start, period_end):
     all_staff = Staff.objects.filter(is_active=True)
 
     for shift in shifts:
+        if not is_surge_shift_active(shift):
+            continue
+
         candidates = []
 
         for staff in all_staff:

@@ -17,6 +17,7 @@ class ShiftSerializer(serializers.ModelSerializer):
 class ShiftAssignmentSerializer(serializers.ModelSerializer):
     shift_start = serializers.DateTimeField(source="shift.start_datetime", read_only=True)
     shift_end   = serializers.DateTimeField(source="shift.end_datetime", read_only=True)
+    care_unit_id = serializers.IntegerField(source="shift.care_unit.id", read_only=True)
 
     shift_label = serializers.CharField(source="shift.shift_type.name", read_only=True)
     staff_name  = serializers.SerializerMethodField()
@@ -35,6 +36,7 @@ class ShiftAssignmentSerializer(serializers.ModelSerializer):
             "assigned_at",
             "shift_start",
             "shift_end",
+            "care_unit_id",
             "shift_label",
             "staff_name",
             "service_name",

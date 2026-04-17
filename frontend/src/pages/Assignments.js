@@ -3,10 +3,14 @@ import API from "../api/api";
 
 export default function Assignments() {
   const [staff, setStaff]             = useState([]);
+  const [eligibleStaff, setEligibleStaff] = useState([]);
   const [shifts, setShifts]           = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [form, setForm]               = useState({ staff: "", shift: "" });
   const [violations, setViolations]   = useState(null);   // ← contraintes dures
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [eligibilityInfo, setEligibilityInfo] = useState(null);
+  const [eligibilityLoading, setEligibilityLoading] = useState(false);
   const [success, setSuccess]         = useState(false);
   const [loading, setLoading]         = useState(false);
 
@@ -28,9 +32,32 @@ export default function Assignments() {
 
   useEffect(() => { load(); }, []);
 
+  const loadEligibleStaff = async (shiftId) => {
+    if (!shiftId) {
+      setEligibleStaff([]);
+      setEligibilityInfo(null);
+      return;
+    }
+    setEligibilityLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await API.get(`/planning/shifts/${shiftId}/eligible_staff/`);
+      const payload = res.data;
+      setEligibleStaff(payload.eligible_staff || []);
+      setEligibilityInfo(payload);
+    } catch (err) {
+      setEligibleStaff([]);
+      setEligibilityInfo(null);
+      setErrorMessage("Impossible de charger les soignants aptes pour ce shift.");
+    } finally {
+      setEligibilityLoading(false);
+    }
+  };
+
   const assign = async () => {
     // Reset des messages
     setViolations(null);
+    setErrorMessage(null);
     setSuccess(false);
 
     // Validation côté client
@@ -48,15 +75,20 @@ export default function Assignments() {
       });
 
       setSuccess(true);
-      setForm({ staff: "", shift: "" });
-      load();
+      // Keep current shift selected to allow adding another staff quickly.
+      setForm(prev => ({ ...prev, staff: "" }));
+      await Promise.all([load(), loadEligibleStaff(form.shift)]);
 
     } catch (err) {
       if (err.response?.status === 409) {
-        // ⚠️ CORRECTION : le backend renvoie "violations", pas "details"
-        setViolations(err.response.data.violations);
+        // Backend returns a list in "details"
+        setViolations(err.response.data.details || []);
       } else {
-        alert("Erreur inattendue : " + JSON.stringify(err.response?.data));
+        setErrorMessage(
+          err.response?.data?.detail ||
+          err.response?.data?.error ||
+          "Erreur inattendue lors de la creation de l'affectation."
+        );
       }
     } finally {
       setLoading(false);
@@ -82,21 +114,12 @@ export default function Assignments() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
 
           <select
-            value={form.staff}
-            onChange={e => setForm({ ...form, staff: e.target.value })}
-            style={selectStyle}
-          >
-            <option value="">— Soignant —</option>
-            {staff.map(s => (
-              <option key={s.id} value={s.id}>
-                {s.first_name} {s.last_name}
-              </option>
-            ))}
-          </select>
-
-          <select
             value={form.shift}
-            onChange={e => setForm({ ...form, shift: e.target.value })}
+            onChange={e => {
+              const shiftId = e.target.value;
+              setForm({ ...form, shift: shiftId, staff: "" });
+              loadEligibleStaff(shiftId);
+            }}
             style={selectStyle}
           >
             <option value="">— Shift —</option>
@@ -108,10 +131,37 @@ export default function Assignments() {
             ))}
           </select>
 
+          <select
+            value={form.staff}
+            onChange={e => setForm({ ...form, staff: e.target.value })}
+            style={selectStyle}
+            disabled={!form.shift || eligibilityLoading}
+          >
+            <option value="">
+              {!form.shift
+                ? "— Choisir un shift d'abord —"
+                : eligibilityLoading
+                  ? "Chargement des soignants aptes..."
+                  : "— Soignant apte —"}
+            </option>
+            {eligibleStaff.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.full_name}
+              </option>
+            ))}
+          </select>
+
           <button onClick={assign} disabled={loading} style={btnStyle("#2563eb")}>
             {loading ? "⏳..." : "➕ Affecter"}
           </button>
         </div>
+        {form.shift && eligibilityInfo && (
+          <p style={{ margin: "10px 0 0", fontSize: 13, color: "#475569" }}>
+            {eligibilityInfo.shift_full
+              ? "Ce shift est deja complet (max staff atteint)."
+              : `${eligibleStaff.length} soignant(s) apte(s) • ${eligibilityInfo.remaining_slots} place(s) restante(s).`}
+          </p>
+        )}
       </div>
 
       {/* ── Message succès ──────────────────────────── */}
@@ -133,23 +183,20 @@ export default function Assignments() {
           <strong style={{ color: "#dc2626", fontSize: 16 }}>
             ⛔ Affectation refusée — contraintes dures violées
           </strong>
+          <ul style={{ margin: "10px 0 0", paddingLeft: 20 }}>
+            {violations.map((msg, i) => (
+              <li key={i} style={{ color: "#7f1d1d", fontSize: 14 }}>{msg}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-          {Object.entries(violations).map(([code, messages]) => (
-            <div key={code} style={{ marginTop: 12 }}>
-              <div style={{
-                background: "#dc2626", color: "white",
-                borderRadius: 4, padding: "2px 8px",
-                display: "inline-block", fontSize: 12, marginBottom: 4
-              }}>
-                {code}
-              </div>
-              <ul style={{ margin: "4px 0", paddingLeft: 20 }}>
-                {messages.map((msg, i) => (
-                  <li key={i} style={{ color: "#7f1d1d", fontSize: 14 }}>{msg}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
+      {errorMessage && (
+        <div style={{
+          background: "#fff7ed", border: "1px solid #fdba74",
+          borderRadius: 8, padding: 12, marginBottom: 16, color: "#9a3412"
+        }}>
+          ⚠️ {errorMessage}
         </div>
       )}
 

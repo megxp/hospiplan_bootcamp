@@ -1,6 +1,7 @@
 from rest_framework import viewsets
 from rest_framework.response import Response  # ← manquant
 from rest_framework import status   
+from rest_framework.decorators import action
 from .models import ShiftType, Shift, ShiftAssignment
 from .serializers import (
     ShiftTypeSerializer,
@@ -10,6 +11,7 @@ from .serializers import (
 from datetime import datetime
 from .generator import generate_planning
 from .constraints import validate_shift_assignment
+from personnel.models import Staff
 
 from rest_framework.decorators import api_view
 
@@ -75,3 +77,56 @@ class ShiftViewSet(viewsets.ModelViewSet):
         "shiftrequiredcertification_set"
     ).all()
     serializer_class = ShiftSerializer
+
+    @action(detail=True, methods=["get"])
+    def eligible_staff(self, request, pk=None):
+        shift = self.get_object()
+        assigned_staff_ids = set(
+            ShiftAssignment.objects.filter(shift=shift).values_list("staff_id", flat=True)
+        )
+
+        already_assigned = len(assigned_staff_ids)
+        remaining_slots = max(shift.max_staff - already_assigned, 0)
+        if remaining_slots == 0:
+            return Response(
+                {
+                    "shift_id": shift.id,
+                    "shift_full": True,
+                    "remaining_slots": 0,
+                    "eligible_staff": [],
+                }
+            )
+
+        candidates = Staff.objects.filter(is_active=True).exclude(id__in=assigned_staff_ids)
+        eligible_staff = []
+        blocked_staff = []
+
+        for staff in candidates:
+            errors = validate_shift_assignment(staff, shift)
+            if errors:
+                blocked_staff.append(
+                    {
+                        "id": staff.id,
+                        "full_name": f"{staff.first_name} {staff.last_name}",
+                        "reasons": errors,
+                    }
+                )
+                continue
+            eligible_staff.append(
+                {
+                    "id": staff.id,
+                    "first_name": staff.first_name,
+                    "last_name": staff.last_name,
+                    "full_name": f"{staff.first_name} {staff.last_name}",
+                }
+            )
+
+        return Response(
+            {
+                "shift_id": shift.id,
+                "shift_full": False,
+                "remaining_slots": remaining_slots,
+                "eligible_staff": eligible_staff,
+                "blocked_staff": blocked_staff,
+            }
+        )

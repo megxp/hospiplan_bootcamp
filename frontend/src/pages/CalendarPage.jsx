@@ -3,6 +3,7 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
+import { useLocation, useNavigate } from "react-router-dom";
 import API from "../api/api";
 
 // Palette couleurs par care_unit (cyclique)
@@ -18,7 +19,8 @@ const SERVICE_COLORS = [
 ];
 
 function getColor(careUnitId) {
-  return SERVICE_COLORS[(careUnitId - 1) % SERVICE_COLORS.length];
+  const safeId = Number(careUnitId) || 1;
+  return SERVICE_COLORS[(safeId - 1) % SERVICE_COLORS.length];
 }
 
 // ── Fetch toutes les pages d'un endpoint paginé ──
@@ -35,9 +37,21 @@ async function fetchAllPages(url) {
 }
 
 export default function CalendarPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const queryParams = new URLSearchParams(location.search);
+  const startParam = queryParams.get("start");
+  const endParam = queryParams.get("end");
+  const initialUnit = queryParams.get("unit") || "all";
+  const initialMode = queryParams.get("mode") === "service" ? "service" : "staff";
+  const initialDate = startParam || undefined;
+
   const [events, setEvents]           = useState([]);
+  const [allEvents, setAllEvents]     = useState([]);
   const [careUnits, setCareUnits]     = useState({});
   const [shiftTypes, setShiftTypes]   = useState({});
+  const [selectedCareUnit, setSelectedCareUnit] = useState(initialUnit);
+  const [displayMode, setDisplayMode] = useState(initialMode);
   const [loading, setLoading]         = useState(true);
   const [selected, setSelected]       = useState(null);
   const [popupPos, setPopupPos]       = useState({ x: 0, y: 0 });
@@ -79,10 +93,12 @@ export default function CalendarPage() {
       const assignments = await fetchAllPages("http://127.0.0.1:8000/api/planning/assignments/");
 
       const formatted = assignments.map(a => {
-        const color = getColor(a.shift?.care_unit || a.care_unit || 1);
+        const careUnitId = Number(a.care_unit_id) || 1;
+        const color = getColor(careUnitId);
+        const baseTitle = a.staff_name || `Soignant #${a.staff}`;
         return {
           id:              `assign-${a.id}`,
-          title:           a.staff_name || `Soignant #${a.staff}`,
+          title:           baseTitle,
           start:           a.shift_start,
           end:             a.shift_end,
           backgroundColor: color.bg,
@@ -94,18 +110,70 @@ export default function CalendarPage() {
             careUnitName:  a.care_unit_name || cuMap[a.care_unit]?.name || "",
             serviceName:   a.service_name || "",
             staffName:     a.staff_name || "",
+            careUnitId,
+            baseTitle,
             assignmentId:  a.id,
           }
         };
       });
 
-      setEvents(formatted);
+      setAllEvents(formatted);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    const filtered = allEvents
+      .filter((evt) => {
+        if (selectedCareUnit === "all") {
+          return true;
+        }
+        return String(evt.extendedProps.careUnitId) === selectedCareUnit;
+      })
+      .map((evt) => ({
+        ...evt,
+        title:
+          displayMode === "service"
+            ? evt.extendedProps.serviceName || evt.extendedProps.careUnitName || "Service"
+            : evt.extendedProps.baseTitle,
+      }));
+
+    setEvents(filtered);
+  }, [allEvents, selectedCareUnit, displayMode]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+
+    if (selectedCareUnit === "all") {
+      params.delete("unit");
+    } else {
+      params.set("unit", selectedCareUnit);
+    }
+
+    if (displayMode === "staff") {
+      params.delete("mode");
+    } else {
+      params.set("mode", displayMode);
+    }
+
+    const nextSearch = params.toString();
+    const currentSearch = location.search.startsWith("?")
+      ? location.search.slice(1)
+      : location.search;
+
+    if (nextSearch !== currentSearch) {
+      navigate(
+        {
+          pathname: location.pathname,
+          search: nextSearch ? `?${nextSearch}` : "",
+        },
+        { replace: true }
+      );
+    }
+  }, [selectedCareUnit, displayMode, navigate, location.pathname, location.search]);
 
   function handleEventClick(info) {
     const rect = info.el.getBoundingClientRect();
@@ -165,12 +233,104 @@ export default function CalendarPage() {
             📅 Calendrier des gardes
           </h2>
           <p style={{ margin: "2px 0 0", fontSize: 13, color: "#94a3b8" }}>
-            Cliquez sur un créneau pour créer un shift · Cliquez sur un événement pour les détails
+            {startParam && endParam
+              ? `Planning généré du ${startParam} au ${endParam}`
+              : "Cliquez sur un créneau pour créer un shift · Cliquez sur un événement pour les détails"}
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {SERVICE_COLORS.slice(0, Math.min(careUnitList.length, 8)).map((c, i) => (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <select
+            value={selectedCareUnit}
+            onChange={(e) => setSelectedCareUnit(e.target.value)}
+            style={{
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 13,
+              color: "#334155",
+              background: "white",
+              cursor: "pointer"
+            }}
+          >
+            <option value="all">Toutes les unités</option>
+            {careUnitList.map((cu) => (
+              <option key={cu.id} value={String(cu.id)}>
+                {cu.name}
+              </option>
+            ))}
+          </select>
+
+          <div style={{ display: "flex", border: "1px solid #cbd5e1", borderRadius: 8, overflow: "hidden" }}>
+            <button
+              type="button"
+              onClick={() => setDisplayMode("staff")}
+                title="Afficher les événements par soignant"
+              style={{
+                border: "none",
+                padding: "6px 10px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                background: displayMode === "staff" ? "#1e293b" : "white",
+                color: displayMode === "staff" ? "white" : "#334155"
+              }}
+            >
+              Par soignant
+            </button>
+            <button
+              type="button"
+              onClick={() => setDisplayMode("service")}
+                title="Afficher les événements par service"
+              style={{
+                border: "none",
+                borderLeft: "1px solid #cbd5e1",
+                padding: "6px 10px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                background: displayMode === "service" ? "#1e293b" : "white",
+                color: displayMode === "service" ? "white" : "#334155"
+              }}
+            >
+              Par service
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedCareUnit("all");
+              setDisplayMode("staff");
+            }}
+            style={{
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              background: "white",
+              color: "#334155",
+              transition: "all 0.15s ease"
+            }}
+          >
+            Réinitialiser
+          </button>
+
+          <span style={{
+            background: "#eef2ff",
+            color: "#3730a3",
+            border: "1px solid #c7d2fe",
+            borderRadius: 20,
+            padding: "4px 10px",
+            fontSize: 12,
+            fontWeight: 600
+          }}>
+            {events.length} affectations
+          </span>
+
+          {SERVICE_COLORS.slice(0, Math.min(careUnitList.length, 4)).map((c, i) => (
             careUnitList[i] && (
               <span key={i} style={{
                 background: c.light, color: c.text,
@@ -212,19 +372,21 @@ export default function CalendarPage() {
               .fc-daygrid-day-number { font-weight: 600; color: #475569; font-size: 13px; text-decoration: none !important; }
               .fc-day-today { background: #eff6ff !important; }
               .fc-day-today .fc-daygrid-day-number { color: #2563eb !important; background: #2563eb; color: white !important; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; }
-              .fc-event { border-radius: 6px !important; font-size: 12px !important; font-weight: 600 !important; cursor: pointer !important; border: none !important; padding: 2px 6px !important; }
+              .fc-event { border-radius: 6px !important; font-size: 11px !important; font-weight: 600 !important; cursor: pointer !important; border: none !important; padding: 1px 5px !important; }
               .fc-event:hover { opacity: 0.88; transform: scale(1.01); transition: all 0.1s; }
-              .fc-timegrid-slot { height: 40px !important; }
+              .fc-timegrid-slot { height: 34px !important; }
               .fc-timegrid-slot-label { font-size: 11px !important; color: #94a3b8 !important; font-weight: 500 !important; }
               .fc-highlight { background: #dbeafe !important; }
               .fc-toolbar { padding: 16px 20px !important; }
               .fc-scrollgrid { border-radius: 0 !important; }
+              select:hover { border-color: #94a3b8; }
             `}</style>
 
             <FullCalendar
               ref={calendarRef}
               plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
               initialView="timeGridWeek"
+              initialDate={initialDate}
               locale="fr"
               firstDay={1}
               headerToolbar={{
@@ -243,7 +405,8 @@ export default function CalendarPage() {
               selectMirror={true}
               select={handleDateSelect}
               eventClick={handleEventClick}
-              height="78vh"
+              dayMaxEvents={true}
+              height="74vh"
               nowIndicator={true}
               slotMinTime="06:00:00"
               slotMaxTime="24:00:00"
